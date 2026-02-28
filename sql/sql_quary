@@ -1,0 +1,272 @@
+-- Задача 1. Время активности объявлений
+WITH limits AS (
+    SELECT  
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY total_area) AS total_area_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY rooms) AS rooms_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY balcony) AS balcony_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_h,
+        PERCENTILE_DISC(0.01) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_l
+    FROM real_estate.flats     
+),
+-- Найдём id объявлений, которые не содержат выбросы:
+filtered_id AS(
+    SELECT id
+    FROM real_estate.flats  
+    WHERE 
+        total_area < (SELECT total_area_limit FROM limits)
+        AND (rooms < (SELECT rooms_limit FROM limits) OR rooms IS NULL)
+        AND (balcony < (SELECT balcony_limit FROM limits) OR balcony IS NULL)
+        AND ((ceiling_height < (SELECT ceiling_height_limit_h FROM limits)
+            AND ceiling_height > (SELECT ceiling_height_limit_l FROM limits)) OR ceiling_height IS NULL)
+    ),
+-- интервалы    
+times AS (
+SELECT
+CASE 
+	WHEN city = 'Санкт-Петербург'
+	THEN 'Saint-petersburg'
+	WHEN city <> 'Санкт-Петербург'
+	THEN 'others'
+END AS cities,
+CASE 
+        WHEN days_exposition IS NULL THEN 'Другие'
+        WHEN days_exposition <= 30 THEN 'до 30 дней'
+        WHEN days_exposition <= 90 THEN '31-90 дней'
+        WHEN days_exposition <= 180 THEN '91-180 дней'
+        ELSE 'более 180 дней'
+    END AS periods,
+       last_price/total_area AS price_for_square,
+       id,
+       total_area,
+       rooms,
+       days_exposition,
+       ceiling_height,
+       floors_total,
+       floor,
+       is_apartment,
+       balcony,
+       open_plan,
+       airports_nearest,
+       parks_around3000,
+       ponds_around3000
+FROM real_estate.flats f
+JOIN real_estate.advertisement a USING(id)
+JOIN real_estate.TYPE t using(type_id)
+JOIN real_estate.city c1 using(city_id)
+--ФИЛЬТР на полные годы (2015, 2016, 2017, 2018) с конца ноября 2014 года по начало мая 2019 года
+WHERE id IN (SELECT * FROM filtered_id) AND TYPE = 'город' AND first_day_exposition BETWEEN '2015-01-01' AND '2018-12-31'
+)
+SELECT cities,
+       periods,
+       COUNT(id),
+       ROUND(COUNT(id) * 1.0/SUM(COUNT(*)) OVER (PARTITION BY cities),5) AS part_of_all_id,
+       ROUND(AVG(price_for_square)) AS avg_price_for_square,
+       ROUND(AVG(total_area)::numeric,5) AS avg_total_area,
+       PERCENTILE_DISC(0.25) WITHIN GROUP (ORDER BY rooms) AS perc25_rooms,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY rooms) AS perc50_rooms,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY floors_total) AS perc50_floors,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY balcony) AS perc50_balcony,
+       COUNT(id) FILTER (WHERE is_apartment = 1) AS yes_apartment,
+       round(COUNT(id) FILTER (WHERE rooms = 0)/COUNT(id)::numeric,5)*100 AS percent_of_studios, //процент студий квартир без комнат
+       round(COUNT(id) FILTER (WHERE open_plan = 1)/COUNT(id)::numeric,5)*100 AS percent_of_open_space, //процент квартир с открытой планировкой
+       ROUND(AVG(ceiling_height)::NUMERIC,5) AS avg_ceiling, 
+       ROUND(AVG(airports_nearest)::NUMERIC,5) AS avg_airports, //среднее расстояние до ближайшего аэропорта
+       COUNT(id) FILTER (WHERE price_for_square >= 113446) AS high_price_for_square,
+       ROUND(COUNT(id) FILTER (WHERE price_for_square >= 113446) *1.0/COUNT(id),2)*100 AS percent_of_high_price, 
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY parks_around3000) AS med_park, //медиана числа парков в радиусе трех километров
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY ponds_around3000) AS med_ponds //медиана числа водоемов в радиусе трех километров
+FROM times
+GROUP BY cities, periods
+ORDER BY part_of_all_id DESC
+;
+
+-- Задача 2. Сезонность объявлений
+-- С учетом замечаний ИТЕРАЦИЯ 1
+-- нужно учитывать все объявления, убираю из фильтра days_exposition IS NOT NULL
+-- Добавить поле с процентом опубликованных объявлений среди всех объявлений (суммарного количества с учетом фильтров)
+-- и поле с процентом снятых
+-- исключила все населенные пункты, кроме городов
+-- Определим аномальные значения (выбросы) по значению перцентилей:
+WITH limits AS (
+    SELECT  
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY total_area) AS total_area_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY rooms) AS rooms_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY balcony) AS balcony_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_h,
+        PERCENTILE_DISC(0.01) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_l
+    FROM real_estate.flats     
+),
+-- Найдём id объявлений, которые не содержат выбросы:
+filtered_id AS(
+    SELECT id
+    FROM real_estate.flats  
+    WHERE 
+        total_area < (SELECT total_area_limit FROM limits)
+        AND (rooms < (SELECT rooms_limit FROM limits) OR rooms IS NULL)
+        AND (balcony < (SELECT balcony_limit FROM limits) OR balcony IS NULL)
+        AND ((ceiling_height < (SELECT ceiling_height_limit_h FROM limits)
+            AND ceiling_height > (SELECT ceiling_height_limit_l FROM limits)) OR ceiling_height IS NULL)
+    ),
+main_characters AS (
+SELECT
+       id,
+       total_area,
+       rooms,
+       last_price/total_area AS price_for_square,
+       days_exposition,
+       ceiling_height,
+       floors_total,
+       floor,
+       last_price,
+       first_day_exposition,
+       is_apartment,
+       balcony,
+       open_plan,
+       airports_nearest,
+       parks_around3000,
+       ponds_around3000
+FROM real_estate.flats f
+JOIN real_estate.advertisement a USING(id)
+JOIN real_estate.TYPE t using(type_id)
+JOIN real_estate.city c1 using(city_id)
+--ФИЛЬТР на полные годы (2015, 2016, 2017, 2018) с конца ноября 2014 года по начало мая 2019 года
+WHERE id IN (SELECT * FROM filtered_id) AND TYPE = 'город' AND first_day_exposition BETWEEN '2015-01-01' AND '2018-12-31'
+),
+first_month AS (
+SELECT TO_CHAR(first_day_exposition, 'Month') AS month_name,
+       count(id) AS count_first,
+       ROUND(AVG(total_area)::numeric, 2) AS avg_total_area_first,
+       ROUND(AVG(last_price/total_area)::numeric, 2) AS avg_price_per_square_meter_first,
+       ROUND(AVG(last_price)::numeric, 2) AS avg_total_price_first
+FROM main_characters
+GROUP BY month_name
+),
+last_month AS (
+SELECT TO_CHAR((first_day_exposition + (days_exposition || ' days')::INTERVAL), 'Month') AS month_name,  
+       count(id) AS count_last,
+       ROUND(AVG(total_area)::numeric, 2) AS avg_total_area_last,
+       ROUND(AVG(last_price/total_area)::numeric, 2) AS avg_price_per_square_meter_last,
+       ROUND(AVG(last_price)::numeric, 2) AS avg_total_price_last
+FROM main_characters
+GROUP BY month_name
+)
+SELECT month_name AS month,
+       count_first, 
+       count_last,
+       RANK() OVER (ORDER BY count_first DESC) AS publication_rank,
+       RANK() OVER (ORDER BY count_last DESC) AS removal_rank,
+       ROUND(count_last * 100.0 / NULLIF(count_first, 0), 1) AS conversion_rate,
+       ROUND(count_first * 100.0 / (SELECT COUNT(*) FROM real_estate.flats), 2) AS percent_published,
+       ROUND(count_last * 100.0 / (SELECT COUNT(*) FROM real_estate.flats), 2) AS percent_removed,
+       avg_total_area_first,
+       avg_total_area_last,
+       avg_price_per_square_meter_first,
+       avg_price_per_square_meter_last
+FROM first_month
+JOIN last_month using(month_name)
+ORDER BY avg_price_per_square_meter_first      
+;
+
+
+-- Задача 3. Анализ рынка недвижимости Ленобласти
+-- С учетом замечаний ИТЕРАЦИЯ 1
+-- ИТЕРАЦИЯ 2 - фильтр от count(id) > 58 был закоммитчен
+-- Санкт-Петербург необходимо исключить
+-- убрала интервал с длительностью жизни объявления
+-- столбцы: кол-во опубликов. объявлений, доля снятых обяъвлений,  средняя стоимость кв. метра,
+-- средняя площадь недвижимости и среднее количество дней активности
+-- Выбрать ТОП-15, общее количество объявлений превышает определённое значение 58 = это значение
+-- 90 прецентеля по кол-ву объявлений. Т.е. 90% находится в кол-ве от 58 штук. Высокий порог или недостаточно?
+-- 99% мне тоже нравится. А топ-15 выбрала по доле успешных сделок, выборка стала разнообразнее, 
+-- включает теперь города с меньшим кол-вом объявлений в топ-15.
+-- поделила объявления на 4 группы по NTILE
+WITH limits AS (
+    SELECT  
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY total_area) AS total_area_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY rooms) AS rooms_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY balcony) AS balcony_limit,
+        PERCENTILE_DISC(0.99) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_h,
+        PERCENTILE_DISC(0.01) WITHIN GROUP (ORDER BY ceiling_height) AS ceiling_height_limit_l
+    FROM real_estate.flats     
+),
+-- Найдём id объявлений, которые не содержат выбросы:
+filtered_id AS(
+    SELECT id
+    FROM real_estate.flats  
+    WHERE 
+        total_area < (SELECT total_area_limit FROM limits)
+        AND (rooms < (SELECT rooms_limit FROM limits) OR rooms IS NULL)
+        AND (balcony < (SELECT balcony_limit FROM limits) OR balcony IS NULL)
+        AND ((ceiling_height < (SELECT ceiling_height_limit_h FROM limits)
+            AND ceiling_height > (SELECT ceiling_height_limit_l FROM limits)) OR ceiling_height IS NULL)
+    ),
+-- интервалы    
+times AS (
+SELECT city,
+       TYPE,
+       last_price/total_area AS price_for_square,
+       id,
+       total_area,
+       rooms,
+       days_exposition,
+       ceiling_height,
+       floors_total,
+       floor,
+       is_apartment,
+       balcony,
+       airports_nearest,
+       parks_around3000,
+       ponds_around3000
+FROM real_estate.flats f
+JOIN real_estate.advertisement a USING(id)
+JOIN real_estate.TYPE t using(type_id)
+JOIN real_estate.city c1 using(city_id)
+WHERE id IN (SELECT * FROM filtered_id) AND city != 'Санкт-Петербург'
+), 
+avg_duration_city AS (
+SELECT city,
+       TYPE,
+       count(id) AS result_publish,
+       ROUND(AVG(days_exposition)::numeric,5) AS avg_days_exposition
+FROM times 
+WHERE days_exposition IS NOT NULL
+GROUP BY city, TYPE
+),
+ntile_cities AS (
+SELECT city,
+       TYPE,
+       avg_days_exposition,
+       CASE NTILE(4) OVER(ORDER BY avg_days_exposition ASC)
+        WHEN 1 THEN 'Быстрые продажи'
+        WHEN 2 THEN 'Средние продажи'
+        WHEN 3 THEN 'медленные продажи'
+        WHEN 4 THEN 'супер медленные продажи'
+       END AS expo_categories
+FROM avg_duration_city
+)
+SELECT t.city,
+       t.TYPE,
+       expo_categories,
+       COUNT(id) AS publish,
+       ROUND(COUNT(days_exposition)::numeric/SUM(COUNT(*)) OVER (PARTITION BY t.city),5) AS part_of_all_id,
+       ROUND(AVG(price_for_square)::numeric,5) AS avg_price_for_square,
+       ROUND(AVG(total_area)::numeric,5) AS avg_total_area,
+       ROUND(AVG(days_exposition)::numeric,5) AS avg_days_exposition,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY rooms) AS perc50_rooms,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY floors_total) AS perc50_floors,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY balcony) AS perc50_balcony,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY parks_around3000) AS perc50_parks,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY ponds_around3000) AS perc50_ponds,
+       COUNT(id) FILTER (WHERE is_apartment = 1) AS yes_apartment,
+       ROUND(AVG(ceiling_height)::NUMERIC,5) AS avg_ceiling
+FROM times t
+JOIN ntile_cities nc ON t.city = nc.city AND t.type = nc.TYPE
+GROUP BY t.city, t.TYPE, expo_categories
+HAVING COUNT(id) > 58
+ORDER BY publish DESC, part_of_all_id desc
+LIMIT 15
+;
+
+
+
+
